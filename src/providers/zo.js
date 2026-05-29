@@ -95,18 +95,41 @@ export class ZoProvider extends BaseProvider {
       console.log(`[ZoProvider] Starting a fresh conversation (first turn).`);
     }
 
-    // 2. Формируем пользовательский ввод
+    // 2. Формируем пользовательский ввод (строго извлекая текст для защиты от 422 ошибки Zo API)
     const lastMessage = messages[messages.length - 1];
-    let userInput = lastMessage.content || "";
+    let userInput = "";
+
+    if (typeof lastMessage.content === "string") {
+      userInput = lastMessage.content;
+    } else if (Array.isArray(lastMessage.content)) {
+      userInput = lastMessage.content
+        .filter((part) => part.type === "text")
+        .map((part) => part.text)
+        .join("\n");
+    } else if (lastMessage.content && typeof lastMessage.content === "object") {
+      userInput = lastMessage.content.text || "";
+    }
 
     // Если это начало диалога и в массиве есть системный промпт — внедряем его
     if (!conversationId) {
       const systemMessage = messages.find((m) => m.role === "system");
       if (systemMessage && systemMessage.content) {
-        userInput = `[System Instruction: ${systemMessage.content}]\n\nUser: ${userInput}`;
-        console.log(
-          `[ZoProvider] Injected system instructions into the first message.`,
-        );
+        let systemText = "";
+        if (typeof systemMessage.content === "string") {
+          systemText = systemMessage.content;
+        } else if (Array.isArray(systemMessage.content)) {
+          systemText = systemMessage.content
+            .filter((part) => part.type === "text")
+            .map((part) => part.text)
+            .join("\n");
+        }
+
+        if (systemText) {
+          userInput = `[System Instruction: ${systemText}]\n\nUser: ${userInput}`;
+          console.log(
+            `[ZoProvider] Injected system instructions into the first message.`,
+          );
+        }
       }
     }
 
@@ -217,11 +240,9 @@ export class ZoProvider extends BaseProvider {
     let buffer = "";
     let currentEvent = "";
 
-    // Структуры для отслеживания отправленного клиенту контента
     const sentLengthByIndex = {}; // index -> длина отправленного текста
     const partKinds = {}; // index -> "text" | "thinking"
 
-    // Функция, вычисляющая только новые (не отправленные ранее) символы
     function getNewTextDelta(index, fullContent) {
       const alreadySent = sentLengthByIndex[index] || 0;
       if (fullContent.length > alreadySent) {
@@ -278,7 +299,7 @@ export class ZoProvider extends BaseProvider {
               let textChunk = "";
               let reasoningChunk = "";
 
-              // Сценарий 1: Начало части (может сразу содержать весь текст в нестриминговых моделях)
+              // Сценарий 1: Начало части
               if (currentEvent === "PartStartEvent" && chunkData.part) {
                 const idx = chunkData.index;
                 const kind = chunkData.part.part_kind;
@@ -292,7 +313,7 @@ export class ZoProvider extends BaseProvider {
                   reasoningChunk = getNewTextDelta(idx, content);
                 }
               }
-              // Сценарий 2: Постепенная генерация дельты (для классических стриминг-моделей)
+              // Сценарий 2: Постепенная генерация дельты
               else if (currentEvent === "PartDeltaEvent" && chunkData.delta) {
                 const idx = chunkData.index;
                 const deltaText = chunkData.delta.content_delta || "";
@@ -308,7 +329,7 @@ export class ZoProvider extends BaseProvider {
                     (sentLengthByIndex[idx] || 0) + deltaText.length;
                 }
               }
-              // Сценарий 3: Завершение части (гарантирует, что мы забрали всё до последнего символа)
+              // Сценарий 3: Завершение части
               else if (currentEvent === "PartEndEvent" && chunkData.part) {
                 const idx = chunkData.index;
                 const kind = chunkData.part.part_kind;
@@ -340,7 +361,7 @@ export class ZoProvider extends BaseProvider {
 
               // --- ОТПРАВКА ОТВЕТА В КЛИЕНТ ---
 
-              // 1. Отправляем текст (контент ответа)
+              // 1. Отправляем текст
               if (textChunk) {
                 console.log(
                   `[Zo Stream Chunk Sent] Text: "${textChunk.replace(/\n/g, "\\n")}"`,
@@ -361,7 +382,7 @@ export class ZoProvider extends BaseProvider {
                 res.write(`data: ${JSON.stringify(openAiChunk)}\n\n`);
               }
 
-              // 2. Отправляем мысли (reasoning_content)
+              // 2. Отправляем мысли
               if (reasoningChunk) {
                 console.log(
                   `[Zo Stream Chunk Sent] Reasoning: "${reasoningChunk.replace(/\n/g, "\\n")}"`,
@@ -376,7 +397,7 @@ export class ZoProvider extends BaseProvider {
                       index: 0,
                       delta: {
                         reasoning_content: reasoningChunk,
-                        reasoning: reasoningChunk, // дублируем для обратной совместимости
+                        reasoning: reasoningChunk,
                       },
                       finish_reason: null,
                     },
@@ -393,7 +414,6 @@ export class ZoProvider extends BaseProvider {
         }
       }
 
-      // Отправляем финальный чанк о завершении генерации
       const finalChunk = {
         id: responseId,
         object: "chat.completion.chunk",
